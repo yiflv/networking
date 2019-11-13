@@ -3,92 +3,82 @@
 #include <stdlib.h>
 #include <error.h>
 #include <netdb.h>
-#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/ip6.h>
 #include <netinet/icmp6.h>
 #include <net/if.h>
 
+#define RT_HDRLEN   24
 #define ICMP_HDRLEN 8
-#define IPV6_HDRLEN 40
-#define PAYLOAD_LEN 7
+#define PAYLOAD_LEN 10
+#define TOTAL_LEN   RT_HDRLEN + ICMP_HDRLEN + PAYLOAD_LEN
 #define IPV6_ADDR_LEN 16
-struct icmp
-{
-    struct icmp6_hdr icmphdr;
-    //char   payload[10];
-    char payload[PAYLOAD_LEN];
-};
 
-uint16_t checksum(uint16_t *, int);
 uint16_t icmpv6_checksum(struct ip6_hdr iphdr, struct icmp6_hdr icmphdr, uint8_t *payload, int payloadlen);
+
+struct ip6_rthdr_0
+  {
+    uint8_t  ip6r0_nxt;		/* next header */
+    uint8_t  ip6r0_len;		/* length in units of 8 octets */
+    uint8_t  ip6r0_type;	/* always zero */
+    uint8_t  ip6r0_segleft;	/* segments left */
+    uint8_t  ip6r0_reserved;	/* reserved field */
+    uint8_t  ip6r0_slmap[3];	/* strict/loose bit map */
+    /* followed by up to 127 struct in6_addr */
+    struct in6_addr ip6r0_addr;
+  };
+
+// argv[1] dst addr
 int main(int argc, const char *argv[])
 {
     int sockfd;
     struct sockaddr_in6 dst;
-    struct icmp icmppkt;
-    struct ip6_hdr iphdr;
-    uint8_t *ip_pkt;
+    struct ip6_hdr pse_hdr;
+    struct ip6_rthdr_0 rthdr;
+    struct icmp6_hdr icmphdr;
+    char   payload[10];
     const int on = 1;
 
-    sockfd = socket(AF_INET6, SOCK_RAW, IPPROTO_RAW);
-    if(sockfd < 0)
+    sockfd = socket(AF_INET6, SOCK_RAW, IPPROTO_ROUTING);
+    if(sockfd < 0){
         perror("socket create");
-
-    // argv[1] src addr; argv[2] dst addr
+        return -1;
+    }
+    
     memset(&dst, 0, sizeof(dst));
     dst.sin6_family = AF_INET6;
     inet_pton(AF_INET6, argv[1], &dst.sin6_addr);
-
-
-    // ipv6 header
-    iphdr.ip6_flow = htonl((6 << 28) | (0 << 20) | 0);
-    iphdr.ip6_plen = htons(ICMP_HDRLEN + PAYLOAD_LEN);
-    iphdr.ip6_nxt = IPPROTO_ICMPV6;
-    iphdr.ip6_hops = 64;
-    inet_pton(AF_INET6, argv[1], &iphdr.ip6_dst);
-    inet_pton(AF_INET6, "::1", &iphdr.ip6_src);
+    // pseudo ipv6 header
+    inet_pton(AF_INET6, argv[1], &pse_hdr.ip6_dst);
+    inet_pton(AF_INET6, "::1", &pse_hdr.ip6_src);
+    // routing header
+    rthdr.ip6r0_nxt = IPPROTO_ICMPV6;	
+    rthdr.ip6r0_len = 2;	
+    rthdr.ip6r0_type = 0;
+    rthdr.ip6r0_segleft = 1;
+    inet_pton(AF_INET6, "::2", &rthdr.ip6r0_addr);
     // icmpv6 header
-    icmppkt.icmphdr.icmp6_type = ICMP6_ECHO_REQUEST;
-    icmppkt.icmphdr.icmp6_code = 0;
-    icmppkt.icmphdr.icmp6_id = htons(getpid());
-    icmppkt.icmphdr.icmp6_seq = htons(0x1);
-    icmppkt.icmphdr.icmp6_cksum = 0;
-    strcpy(icmppkt.payload, "123456");
-    icmppkt.icmphdr.icmp6_cksum = icmpv6_checksum(iphdr, icmppkt.icmphdr, &icmppkt.payload, PAYLOAD_LEN);
-    
-    /*if (setsockopt (sockfd, IPPROTO_IPV6, IP_HDRINCL, &on, sizeof (on)) < 0) {
-        perror ("setsockopt() failed to set IP_HDRINCL ");
-        exit (EXIT_FAILURE);
-    }*/
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", "lo");
-
-
-    // Bind socket to interface index.
-    if (setsockopt (sockfd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof (ifr)) < 0) {
-        perror ("setsockopt() failed to bind to interface ");
-        exit (EXIT_FAILURE);
-    }
-    ip_pkt = (uint8_t *)malloc(IPV6_HDRLEN + ICMP_HDRLEN + PAYLOAD_LEN);
+    icmphdr.icmp6_type = ICMP6_ECHO_REQUEST;
+    icmphdr.icmp6_code = 0;
+    icmphdr.icmp6_id = 0x2345;
+    icmphdr.icmp6_seq = htons(0x0001);
+    icmphdr.icmp6_cksum = 0;
+    strcpy(payload, "hello1234");
+    icmphdr.icmp6_cksum = icmpv6_checksum(pse_hdr, icmphdr, &payload, PAYLOAD_LEN);
+    // IPv6 packet ptr
+    uint8_t *ip_pkt = (uint8_t *)malloc(sizeof(uint8_t)*TOTAL_LEN);
     if(ip_pkt < 0)
         perror("ipv6 packet create");
-    memcpy(ip_pkt, &iphdr, sizeof(iphdr));
-    memcpy(ip_pkt + IPV6_HDRLEN, &icmppkt, ICMP_HDRLEN + PAYLOAD_LEN);
-    while(1){
-        int bytes = sendto(sockfd, ip_pkt, IPV6_HDRLEN + ICMP_HDRLEN + PAYLOAD_LEN, 0, (struct sockaddr *)&dst, sizeof(dst));
-        if(bytes < 0)
-            perror("send failed");
-        sleep(2);
-        }
-    struct sockaddr_in6 peer_addr;
-    int addrlen = sizeof(peer_addr);
-    uint8_t buf[100];
-    int recvfd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
-   // bytes = recvfrom(recvfd, &buf, sizeof(buf), 0, (struct sockaddr *)&peer_addr, &addrlen);
-    //if(bytes < 0)
-     //   return -1;    
+    // Construct IPv6 datagram
+    memcpy(ip_pkt, &rthdr, sizeof(rthdr));
+    memcpy(ip_pkt + RT_HDRLEN, &icmphdr, sizeof(icmphdr));
+    memcpy(ip_pkt + RT_HDRLEN + ICMP_HDRLEN, payload, sizeof(payload));
+    // Send the datagram
+    int bytes = sendto(sockfd, ip_pkt, TOTAL_LEN, 0, (struct sockaddr *)&dst, sizeof(dst));
+    if(bytes < 0){
+        perror("send failed");
+        return -1;
+    }
     return 1;
 }
 
@@ -146,7 +136,6 @@ uint16_t icmpv6_checksum(struct ip6_hdr iphdr, struct icmp6_hdr icmphdr, uint8_t
     memcpy (ptr, &iphdr.ip6_nxt, sizeof (iphdr.ip6_nxt));
     ptr += sizeof (iphdr.ip6_nxt);
     chksumlen += sizeof (iphdr.ip6_nxt);
-
     // Copy ICMPv6 
     memcpy(ptr, &icmphdr, ICMP_HDRLEN);
     chksumlen += ICMP_HDRLEN;

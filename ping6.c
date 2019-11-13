@@ -13,82 +13,55 @@
 #define IPV6_HDRLEN 40
 #define PAYLOAD_LEN 7
 #define IPV6_ADDR_LEN 16
-struct icmp
-{
-    struct icmp6_hdr icmphdr;
-    //char   payload[10];
-    char payload[PAYLOAD_LEN];
-};
 
 uint16_t checksum(uint16_t *, int);
 uint16_t icmpv6_checksum(struct ip6_hdr iphdr, struct icmp6_hdr icmphdr, uint8_t *payload, int payloadlen);
 int main(int argc, const char *argv[])
 {
     int sockfd;
+    struct ip6_hdr pse_hdr;
     struct sockaddr_in6 dst;
-    struct icmp icmppkt;
-    struct ip6_hdr iphdr;
+    struct icmp6_hdr icmphdr;
+    char payload[PAYLOAD_LEN];
     uint8_t *ip_pkt;
-    const int on = 1;
+    int send_bytes, recv_bytes;
 
-    sockfd = socket(AF_INET6, SOCK_RAW, IPPROTO_RAW);
+    sockfd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
     if(sockfd < 0)
         perror("socket create");
-
-    // argv[1] src addr; argv[2] dst addr
     memset(&dst, 0, sizeof(dst));
     dst.sin6_family = AF_INET6;
+    // argv[1]  destination address
     inet_pton(AF_INET6, argv[1], &dst.sin6_addr);
-
-
-    // ipv6 header
-    iphdr.ip6_flow = htonl((6 << 28) | (0 << 20) | 0);
-    iphdr.ip6_plen = htons(ICMP_HDRLEN + PAYLOAD_LEN);
-    iphdr.ip6_nxt = IPPROTO_ICMPV6;
-    iphdr.ip6_hops = 64;
-    inet_pton(AF_INET6, argv[1], &iphdr.ip6_dst);
-    inet_pton(AF_INET6, "::1", &iphdr.ip6_src);
     // icmpv6 header
-    icmppkt.icmphdr.icmp6_type = ICMP6_ECHO_REQUEST;
-    icmppkt.icmphdr.icmp6_code = 0;
-    icmppkt.icmphdr.icmp6_id = htons(getpid());
-    icmppkt.icmphdr.icmp6_seq = htons(0x1);
-    icmppkt.icmphdr.icmp6_cksum = 0;
-    strcpy(icmppkt.payload, "123456");
-    icmppkt.icmphdr.icmp6_cksum = icmpv6_checksum(iphdr, icmppkt.icmphdr, &icmppkt.payload, PAYLOAD_LEN);
-    
-    /*if (setsockopt (sockfd, IPPROTO_IPV6, IP_HDRINCL, &on, sizeof (on)) < 0) {
-        perror ("setsockopt() failed to set IP_HDRINCL ");
-        exit (EXIT_FAILURE);
-    }*/
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", "lo");
-
-
-    // Bind socket to interface index.
-    if (setsockopt (sockfd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof (ifr)) < 0) {
-        perror ("setsockopt() failed to bind to interface ");
-        exit (EXIT_FAILURE);
-    }
-    ip_pkt = (uint8_t *)malloc(IPV6_HDRLEN + ICMP_HDRLEN + PAYLOAD_LEN);
-    if(ip_pkt < 0)
-        perror("ipv6 packet create");
-    memcpy(ip_pkt, &iphdr, sizeof(iphdr));
-    memcpy(ip_pkt + IPV6_HDRLEN, &icmppkt, ICMP_HDRLEN + PAYLOAD_LEN);
-    while(1){
-        int bytes = sendto(sockfd, ip_pkt, IPV6_HDRLEN + ICMP_HDRLEN + PAYLOAD_LEN, 0, (struct sockaddr *)&dst, sizeof(dst));
-        if(bytes < 0)
-            perror("send failed");
-        sleep(2);
-        }
+    icmphdr.icmp6_type = ICMP6_ECHO_REQUEST;
+    icmphdr.icmp6_code = 0;
+    icmphdr.icmp6_id = htons(getpid());
+    icmphdr.icmp6_seq = htons(0x1);
+    icmphdr.icmp6_cksum = 0;
+    strcpy(payload, "123456");
+    // pseudo header
+    pse_hdr.ip6_nxt = IPPROTO_ICMPV6;
+    inet_pton(AF_INET6, argv[1], &pse_hdr.ip6_dst);
+    inet_pton(AF_INET6, "::1", &pse_hdr.ip6_src);
+    icmphdr.icmp6_cksum = icmpv6_checksum(pse_hdr, icmphdr, &payload, PAYLOAD_LEN); // Acutally the kernel will calculate this automatically
+    ip_pkt = (uint8_t *)malloc(ICMP_HDRLEN + PAYLOAD_LEN);
+    memcpy(ip_pkt, &icmphdr, ICMP_HDRLEN);
+    memcpy(ip_pkt + ICMP_HDRLEN, &payload, PAYLOAD_LEN);
+    // peer address
     struct sockaddr_in6 peer_addr;
     int addrlen = sizeof(peer_addr);
     uint8_t buf[100];
-    int recvfd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
-   // bytes = recvfrom(recvfd, &buf, sizeof(buf), 0, (struct sockaddr *)&peer_addr, &addrlen);
-    //if(bytes < 0)
-     //   return -1;    
+    while(1){
+        send_bytes = sendto(sockfd, ip_pkt, ICMP_HDRLEN + PAYLOAD_LEN, 0, (struct sockaddr *)&dst, sizeof(dst));
+        if(send_bytes < 0)
+            perror("send failed");
+        recv_bytes = recvfrom(sockfd, &buf, sizeof(buf), 0, (struct sockaddr *)&peer_addr, &addrlen);
+        if(recv_bytes < 0)
+            perror("receive failed");
+        printf("Receive %d bytes\n", recv_bytes);
+        sleep(2);
+    }
     return 1;
 }
 
